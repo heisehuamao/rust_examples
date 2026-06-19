@@ -1,6 +1,7 @@
 #![allow(warnings)]
 use std::fmt;
 
+use my_macro::MyTrait;
 use my_macro::my_custom_attribute;
 use my_macro::my_field_attribute;
 use my_macro::process_type_params;
@@ -44,11 +45,29 @@ enum UserRole {
 struct MyData<
     'a,
     const N: usize,
-    #[my_type_attr(a = false, b, c)] T: Clone + std::fmt::Debug = String,
+    #[my_type_attr(a = false, b, c)]
+    #[doc] T: Clone + std::fmt::Debug = String,
 > {
     reference: &'a str,
     payload: T,
     array: [i32; N],
+}
+
+#[derive(MyTrait, Default)]
+#[my_trait(msg = "Running custom macro code!", count = 3)]
+struct UserConfig {
+    key: String,
+
+    #[my_trait(rename = "fdsfds")]
+    value: String,
+}
+
+#[derive(MyTrait)]
+#[my_trait(msg = "This one only prints once")]
+enum AppConfig {
+    Path,
+    #[my_trait(skip, version = -1)]
+    Os,
 }
 
 fn main() {
@@ -62,4 +81,10 @@ fn main() {
     };
 
     println!("Payload: {:?}", data.payload);
+
+    let user = UserConfig::default();
+    user.print_message(); // Prints the message 3 times
+
+    let app = AppConfig::Path;
+    app.print_message(); // Prints the message 1 time (default)
 }
