@@ -11,8 +11,7 @@ use std::fmt;
 //     Error,
 // }
 
-#[derive(DebugMacro)]
-#[derive(Clone, Debug)]
+#[derive(DebugMacro, Clone, Debug)]
 #[my_custom_attr(key = "value")]
 pub enum LogLevel<'a, T: Clone + fmt::Debug + 'static> {
     #[variant_config(enable = true)]
@@ -62,6 +61,11 @@ impl fmt::Debug for MyUnion {
         }
     }
 }
+
+// #[derive(DebugMacro)]
+// fn my_fun() {
+//
+// }
 
 fn main() {
     let lvl = LogLevel::<i32>::Trace;
