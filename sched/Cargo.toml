@@ -1,0 +1,7 @@
+[package]
+name = "sched"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+my_sched = {path = "my_sched"}
