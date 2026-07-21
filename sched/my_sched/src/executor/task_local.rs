@@ -1,6 +1,10 @@
 #![allow(unused)]
 
-use std::pin::Pin;
+use std::{
+    cell::{Cell, RefCell},
+    pin::Pin,
+    task::{Context, Poll},
+};
 
 use crate::executor::task_id::TaskId;
 
@@ -19,8 +23,8 @@ pub(super) type TaskFuture<T> = Pin<Box<dyn Future<Output = T> + Send + 'static>
 pub(super) struct TaskLocal<T> {
     id: TaskId,
     name: String,
-    state: TaskStatus,
-    future: TaskFuture<T>,
+    state: Cell<TaskStatus>,
+    future: RefCell<TaskFuture<T>>,
 }
 
 impl<T> TaskLocal<T> {
@@ -30,15 +34,27 @@ impl<T> TaskLocal<T> {
     {
         Self {
             id,
-            state: TaskStatus::Init,
+            state: Cell::new(TaskStatus::Init),
             name,
-            future: Box::pin(fut),
+            future: RefCell::new(Box::pin(fut)),
         }
     }
 
-    pub async fn run(self) -> T {
-        self.future.await
+    pub fn set_status(&self, st: TaskStatus) {
+        self.state.set(st)
     }
+
+    /// Polls the future in-place without needing &mut self or Option wrapping
+    pub fn poll(&self, cx: &mut Context<'_>) -> Poll<T> {
+        self.future.borrow_mut().as_mut().poll(cx)
+    }
+    // pub fn take_future(&mut self) -> &mut TaskFuture<T> {
+    //     self.future.borrow_mut().as_mut()
+    // }
+
+    // pub async fn run(self) -> T {
+    //     self.future.await
+    // }
 }
 
 pub fn run_task() {
