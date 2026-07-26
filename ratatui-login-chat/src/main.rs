@@ -1,14 +1,12 @@
 use crossterm::{
     ExecutableCommand,
-    event::{self, Event, KeyCode, KeyEventKind},
+    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
-
-use ratatui::layout::Alignment;
 use std::io::{Result, stdout};
 
 enum AppMode {
@@ -21,17 +19,31 @@ enum LoginField {
     Password,
 }
 
+#[derive(PartialEq)]
+enum ActivePanel {
+    Sidebar,
+    ChatBox,
+    Input,
+}
+
+struct ChatSession {
+    name: String,
+    messages: Vec<String>,
+}
+
 struct App {
     mode: AppMode,
     // Login State
     active_field: LoginField,
     username: String,
     password: String,
-    // Chat State
+    // Chat & Sidebar State
+    active_panel: ActivePanel,
+    sessions: Vec<ChatSession>,
+    session_list_state: ListState,
     chat_input: String,
-    messages: Vec<String>,
     // Command Popup State
-    available_commands: Vec<(&'static str, &'static str)>, // (Command, Description)
+    available_commands: Vec<(&'static str, &'static str)>,
     command_list_state: ListState,
 }
 
@@ -39,27 +51,50 @@ impl App {
     fn new() -> Self {
         let commands = vec![
             ("/help", "Show help information"),
-            ("/clear", "Clear chat history"),
-            ("/nick", "Change your display username"),
+            ("/clear", "Clear current chat history"),
+            ("/nick", "Change display username"),
             ("/users", "List online users"),
             ("/quit", "Exit application"),
         ];
 
-        let mut list_state = ListState::default();
-        list_state.select(Some(0));
+        let mut command_list_state = ListState::default();
+        command_list_state.select(Some(0));
+
+        let initial_sessions = vec![
+            ChatSession {
+                name: "General".to_string(),
+                messages: vec![
+                    "System: Welcome to General Chat!".to_string(),
+                    "Bot: Type '/' to open the command palette.".to_string(),
+                ],
+            },
+            ChatSession {
+                name: "Project Rust".to_string(),
+                messages: vec![
+                    "System: Welcome to Project Rust discussion.".to_string(),
+                    "Bot: Let's discuss Ratatui updates here!".to_string(),
+                ],
+            },
+            ChatSession {
+                name: "Random".to_string(),
+                messages: vec!["System: Off-topic lounge.".to_string()],
+            },
+        ];
+
+        let mut session_list_state = ListState::default();
+        session_list_state.select(Some(0));
 
         Self {
             mode: AppMode::Login,
             active_field: LoginField::Username,
             username: String::new(),
             password: String::new(),
+            active_panel: ActivePanel::Input,
+            sessions: initial_sessions,
+            session_list_state,
             chat_input: String::new(),
-            messages: vec![
-                "System: Welcome to the Chat Room!".to_string(),
-                "Bot: Type '/' to open the command palette.".to_string(),
-            ],
             available_commands: commands,
-            command_list_state: list_state,
+            command_list_state,
         }
     }
 
@@ -110,6 +145,56 @@ impl App {
         };
         self.command_list_state.select(Some(i));
     }
+
+    fn next_session(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let i = match self.session_list_state.selected() {
+            Some(i) => {
+                if i >= self.sessions.len() - 1 {
+                    0
+                } else {
+                    i + 1
+                }
+            }
+            None => 0,
+        };
+        self.session_list_state.select(Some(i));
+    }
+
+    fn previous_session(&mut self) {
+        if self.sessions.is_empty() {
+            return;
+        }
+        let i = match self.session_list_state.selected() {
+            Some(i) => {
+                if i == 0 {
+                    self.sessions.len() - 1
+                } else {
+                    i - 1
+                }
+            }
+            None => 0,
+        };
+        self.session_list_state.select(Some(i));
+    }
+
+    fn current_session_mut(&mut self) -> Option<&mut ChatSession> {
+        if let Some(idx) = self.session_list_state.selected() {
+            self.sessions.get_mut(idx)
+        } else {
+            None
+        }
+    }
+
+    fn current_session(&self) -> Option<&ChatSession> {
+        if let Some(idx) = self.session_list_state.selected() {
+            self.sessions.get(idx)
+        } else {
+            None
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -126,7 +211,6 @@ fn main() -> Result<()> {
             if let Event::Key(key) = event::read()? {
                 if key.kind == KeyEventKind::Press {
                     if key.code == KeyCode::Esc {
-                        // If popup is open, Esc closes popup by clearing input prefix '/'
                         if app.chat_input.starts_with('/') {
                             app.chat_input.clear();
                         } else {
@@ -135,7 +219,7 @@ fn main() -> Result<()> {
                     } else {
                         match app.mode {
                             AppMode::Login => handle_login_input(&mut app, key.code),
-                            AppMode::Chat => handle_chat_input(&mut app, key.code),
+                            AppMode::Chat => handle_chat_input(&mut app, key.code, key.modifiers),
                         }
                     }
                 }
@@ -162,8 +246,11 @@ fn handle_login_input(app: &mut App, key: KeyCode) {
         }
         KeyCode::Enter => {
             if !app.username.trim().is_empty() {
-                app.messages
-                    .push(format!("System: Logged in as {}", app.username));
+                // Format/clone the message first, before borrowing app mutably
+                let login_msg = format!("System: Logged in as {}", app.username);
+                if let Some(session) = app.current_session_mut() {
+                    session.messages.push(login_msg);
+                }
                 app.mode = AppMode::Chat;
             }
         }
@@ -183,18 +270,18 @@ fn handle_login_input(app: &mut App, key: KeyCode) {
     }
 }
 
-fn handle_chat_input(app: &mut App, key: KeyCode) {
+fn handle_chat_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
     let is_command_mode = app.chat_input.starts_with('/');
 
+    // Command palette Navigation (Active when typing '/')
     if is_command_mode {
         let filtered = app.filtered_commands();
-
         match key {
             KeyCode::Up => {
                 app.previous_command();
                 return;
             }
-            KeyCode::Down | KeyCode::Tab => {
+            KeyCode::Down => {
                 app.next_command();
                 return;
             }
@@ -212,39 +299,79 @@ fn handle_chat_input(app: &mut App, key: KeyCode) {
         }
     }
 
-    // Standard Chat Input
-    match key {
-        KeyCode::Enter => {
-            if !app.chat_input.trim().is_empty() {
-                let msg = format!("{}: {}", app.username, app.chat_input.trim());
-                app.messages.push(msg);
-                app.chat_input.clear();
+    // Tab Navigation between Panels
+    if key == KeyCode::Tab {
+        app.active_panel = match app.active_panel {
+            ActivePanel::Input => ActivePanel::Sidebar,
+            ActivePanel::Sidebar => ActivePanel::ChatBox,
+            ActivePanel::ChatBox => ActivePanel::Input,
+        };
+        return;
+    } else if key == KeyCode::BackTab {
+        app.active_panel = match app.active_panel {
+            ActivePanel::Input => ActivePanel::ChatBox,
+            ActivePanel::ChatBox => ActivePanel::Sidebar,
+            ActivePanel::Sidebar => ActivePanel::Input,
+        };
+        return;
+    }
+
+    // Panel-specific Controls
+    match app.active_panel {
+        ActivePanel::Sidebar => match key {
+            KeyCode::Up | KeyCode::Char('k') => app.previous_session(),
+            KeyCode::Down | KeyCode::Char('j') => app.next_session(),
+            _ => {}
+        },
+        ActivePanel::ChatBox => {
+            // Scroll controls for messages can be expanded here
+        }
+        ActivePanel::Input => match key {
+            KeyCode::Enter => {
+                if !app.chat_input.trim().is_empty() {
+                    let msg = format!("{}: {}", app.username, app.chat_input.trim());
+                    if let Some(session) = app.current_session_mut() {
+                        session.messages.push(msg);
+                    }
+                    app.chat_input.clear();
+                }
             }
-        }
-        KeyCode::Char(c) => {
-            app.chat_input.push(c);
-            // Reset command selection when input changes
-            app.command_list_state.select(Some(0));
-        }
-        KeyCode::Backspace => {
-            app.chat_input.pop();
-            app.command_list_state.select(Some(0));
-        }
-        _ => {}
+            KeyCode::Char(c) => {
+                app.chat_input.push(c);
+                app.command_list_state.select(Some(0));
+            }
+            KeyCode::Backspace => {
+                app.chat_input.pop();
+                app.command_list_state.select(Some(0));
+            }
+            _ => {}
+        },
     }
 }
 
 fn execute_command(app: &mut App, cmd: &str) {
     match cmd {
-        "/clear" => app.messages.clear(),
-        "/help" => app
-            .messages
-            .push("System: Available commands: /clear, /nick, /users, /quit".to_string()),
-        "/users" => app
-            .messages
-            .push("System: Online users: [You], Bot".to_string()),
+        "/clear" => {
+            if let Some(session) = app.current_session_mut() {
+                session.messages.clear();
+            }
+        }
+        "/help" => {
+            if let Some(session) = app.current_session_mut() {
+                session
+                    .messages
+                    .push("System: Commands: /clear, /nick, /users, /quit".to_string());
+            }
+        }
+        "/users" => {
+            if let Some(session) = app.current_session_mut() {
+                session
+                    .messages
+                    .push("System: Online users: [You], Bot".to_string());
+            }
+        }
         "/quit" => std::process::exit(0),
-        "/nick" => app.chat_input = "/nick ".to_string(), // Keep prefix to complete command with args
+        "/nick" => app.chat_input = "/nick ".to_string(),
         _ => {}
     }
 
@@ -332,97 +459,111 @@ fn render_login_screen(frame: &mut Frame, app: &App) {
     frame.render_widget(help_text, inner_layout[2]);
 }
 
-// fn render_chat_screen(frame: &mut Frame, app: &mut App) {
-//     let chunks = Layout::default()
-//         .direction(Direction::Vertical)
-//         .constraints([
-//             Constraint::Min(1),    // Messages area
-//             Constraint::Length(3), // Input area
-//         ])
-//         .split(frame.size());
-//
-//     // Messages View
-//     let items: Vec<ListItem> = app
-//         .messages
-//         .iter()
-//         .map(|msg| ListItem::new(msg.as_str()))
-//         .collect();
-//
-//     let messages_list = List::new(items).block(
-//         Block::default()
-//             .borders(Borders::ALL)
-//             .title(" Chat Room ")
-//             .border_style(Style::default().fg(Color::Green)),
-//     );
-//     frame.render_widget(messages_list, chunks[0]);
-//
-//     // Input View
-//     let input = Paragraph::new(app.chat_input.as_str()).block(
-//         Block::default()
-//             .borders(Borders::ALL)
-//             .title(format!(
-//                 " Type Message as [{}] (Type '/' for commands) ",
-//                 app.username
-//             ))
-//             .border_style(Style::default().fg(Color::Yellow)),
-//     );
-//     frame.render_widget(input, chunks[1]);
-//
-//     // Render Command Selection Popup overlay if input starts with '/'
-//     if app.chat_input.starts_with('/') {
-//         render_command_popup(frame, app, chunks[1]);
-//     }
-// }
-
 fn render_chat_screen(frame: &mut Frame, app: &mut App) {
-    let chunks = Layout::default()
+    // Horizontal layout split: Sidebar (left) vs Main Chat Area (right)
+    let main_layout = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(22), // Sidebar width
+            Constraint::Min(1),     // Chat area space
+        ])
+        .split(frame.size());
+
+    // 1. Render Sidebar
+    let sidebar_items: Vec<ListItem> = app
+        .sessions
+        .iter()
+        .map(|s| ListItem::new(format!("# {}", s.name)))
+        .collect();
+
+    let sidebar_border_color = if app.active_panel == ActivePanel::Sidebar {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
+    let sidebar_list = List::new(sidebar_items)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(" Channels ")
+                .border_style(Style::default().fg(sidebar_border_color)),
+        )
+        .highlight_style(
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("> ");
+
+    frame.render_stateful_widget(sidebar_list, main_layout[0], &mut app.session_list_state);
+
+    // 2. Vertical layout for Chat Area (Messages top, Input bottom)
+    let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(1),    // Messages area
             Constraint::Length(3), // Input area
         ])
-        .split(frame.size());
+        .split(main_layout[1]);
 
-    // Messages View
+    // Render Messages View for currently selected session
+    let chat_border_color = if app.active_panel == ActivePanel::ChatBox {
+        Color::Yellow
+    } else {
+        Color::Green
+    };
+
+    let current_session_name = app
+        .current_session()
+        .map(|s| s.name.as_str())
+        .unwrap_or("Chat Room");
+
     let items: Vec<ListItem> = app
-        .messages
-        .iter()
-        .map(|msg| {
-            // Check if the message is from "Bot:" or "System:" to align right
-            if msg.starts_with("Bot:") || msg.starts_with("System:") {
-                let line = Line::from(msg.as_str()).alignment(Alignment::Right);
-                ListItem::new(line)
-            } else {
-                // User messages remain left-aligned
-                let line = Line::from(msg.as_str()).alignment(Alignment::Left);
-                ListItem::new(line)
-            }
+        .current_session()
+        .map(|s| {
+            s.messages
+                .iter()
+                .map(|msg| {
+                    if msg.starts_with("Bot:") || msg.starts_with("System:") {
+                        ListItem::new(Line::from(msg.as_str()).alignment(Alignment::Right))
+                    } else {
+                        ListItem::new(Line::from(msg.as_str()).alignment(Alignment::Left))
+                    }
+                })
+                .collect()
         })
-        .collect();
+        .unwrap_or_default();
 
     let messages_list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Chat Room ")
-            .border_style(Style::default().fg(Color::Green)),
+            .title(format!(" #{} ", current_session_name))
+            .border_style(Style::default().fg(chat_border_color)),
     );
-    frame.render_widget(messages_list, chunks[0]);
+    frame.render_widget(messages_list, right_chunks[0]);
 
-    // Input View
+    // Render Input View
+    let input_border_color = if app.active_panel == ActivePanel::Input {
+        Color::Yellow
+    } else {
+        Color::DarkGray
+    };
+
     let input = Paragraph::new(app.chat_input.as_str()).block(
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " Type Message as [{}] (Type '/' for commands) ",
+                " Message [{}] (Tab to switch panel | '/' for commands) ",
                 app.username
             ))
-            .border_style(Style::default().fg(Color::Yellow)),
+            .border_style(Style::default().fg(input_border_color)),
     );
-    frame.render_widget(input, chunks[1]);
+    frame.render_widget(input, right_chunks[1]);
 
-    // Render Command Selection Popup overlay if input starts with '/'
+    // Render Command Selection Popup overlay if typing '/'
     if app.chat_input.starts_with('/') {
-        render_command_popup(frame, app, chunks[1]);
+        render_command_popup(frame, app, right_chunks[1]);
     }
 }
 
@@ -434,7 +575,6 @@ fn render_command_popup(frame: &mut Frame, app: &mut App, input_area: Rect) {
 
     let popup_height = (filtered_cmds.len() as u16 + 2).min(8);
 
-    // Calculate popup area placed directly above the input box
     let popup_area = Rect {
         x: input_area.x + 2,
         y: input_area.y.saturating_sub(popup_height),
@@ -442,7 +582,6 @@ fn render_command_popup(frame: &mut Frame, app: &mut App, input_area: Rect) {
         height: popup_height,
     };
 
-    // Clear background behind popup overlay
     frame.render_widget(Clear, popup_area);
 
     let items: Vec<ListItem> = filtered_cmds
@@ -464,7 +603,7 @@ fn render_command_popup(frame: &mut Frame, app: &mut App, input_area: Rect) {
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(" Commands (▲/▼/Tab to select) ")
+                .title(" Commands (▲/▼ to select) ")
                 .border_style(Style::default().fg(Color::Cyan)),
         )
         .highlight_style(
