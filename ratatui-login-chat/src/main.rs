@@ -523,6 +523,22 @@ fn render_login_screen(frame: &mut Frame, app: &mut App) {
     let help_text = Paragraph::new("Click field or Tab/Arrows to focus | Enter to Login")
         .style(Style::default().fg(Color::Gray));
     frame.render_widget(help_text, inner_layout[2]);
+
+    // Set cursor based on active field
+    match app.active_field {
+        LoginField::Username => {
+            let cursor_x = inner_layout[0].x + 1 + app.username.len() as u16;
+            let cursor_y = inner_layout[0].y + 1;
+            let max_x = inner_layout[0].x + inner_layout[0].width.saturating_sub(2);
+            frame.set_cursor_position(Position::new(cursor_x.min(max_x), cursor_y));
+        }
+        LoginField::Password => {
+            let cursor_x = inner_layout[1].x + 1 + app.password.len() as u16;
+            let cursor_y = inner_layout[1].y + 1;
+            let max_x = inner_layout[1].x + inner_layout[1].width.saturating_sub(2);
+            frame.set_cursor_position(Position::new(cursor_x.min(max_x), cursor_y));
+        }
+    }
 }
 
 fn render_chat_screen(frame: &mut Frame, app: &mut App) {
@@ -633,6 +649,20 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(input, right_chunks[1]);
 
+    // -------------------------------------------------------------
+    // NEW: Display the terminal cursor inside the input field
+    // -------------------------------------------------------------
+    if app.active_panel == ActivePanel::Input {
+        // x: left border (1 cell offset) + current character count
+        let cursor_x = right_chunks[1].x + 1 + app.chat_input.len() as u16;
+        // y: top border (1 row offset)
+        let cursor_y = right_chunks[1].y + 1;
+
+        // Ensure cursor doesn't render past the right border of the input box
+        let max_x = right_chunks[1].x + right_chunks[1].width.saturating_sub(2);
+        frame.set_cursor_position(Position::new(cursor_x.min(max_x), cursor_y));
+    }
+
     // Popup overlay for '/' commands
     if app.chat_input.starts_with('/') {
         render_command_popup(frame, app, right_chunks[1]);
@@ -687,4 +717,3 @@ fn render_command_popup(frame: &mut Frame, app: &mut App, input_area: Rect) {
 
     frame.render_stateful_widget(popup_list, popup_area, &mut app.command_list_state);
 }
-
