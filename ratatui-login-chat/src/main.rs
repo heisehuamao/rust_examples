@@ -11,6 +11,11 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::io::{Result, stdout};
+use syntect::{
+    easy::HighlightLines,
+    highlighting::{Style as SyntectStyle, ThemeSet},
+    parsing::SyntaxSet,
+};
 
 // ==========================================
 // STATE MODELS
@@ -49,6 +54,9 @@ struct App {
     sessions: Vec<ChatSession>,
     session_list_state: ListState,
     chat_input: String,
+    // Syntect Syntax Highlighting
+    syntax_set: SyntaxSet,
+    theme_set: ThemeSet,
     // Command Popup State
     available_commands: Vec<(&'static str, &'static str)>,
     command_list_state: ListState,
@@ -85,7 +93,19 @@ impl App {
                 name: "Project Rust".to_string(),
                 messages: vec![
                     "System: Welcome to Project Rust discussion.".to_string(),
-                    "Bot: Let's discuss Ratatui updates here!".to_string(),
+                    "Bot: Here is a snippet rendered with syntect:\n```rust\nfn main() {\n    let msg = \"Hello Ratatui + Syntect!\";\n    println!(\"{}\", msg);\n}\n```".to_string(),
+                ],
+            },
+            ChatSession {
+                name: "Project C".to_string(),
+                messages: vec![
+                    "System: Welcome to Project C discussion.".to_string(),
+                    "Bot: Here is a snippet rendered with syntect:\n```c
+                        int main(void) {
+                        printf(\"Hello, World!\n\");
+                        return 0;
+                    }
+                        ```".to_string(),
                 ],
             },
             ChatSession {
@@ -106,6 +126,8 @@ impl App {
             sessions: initial_sessions,
             session_list_state,
             chat_input: String::new(),
+            syntax_set: SyntaxSet::load_defaults_newlines(),
+            theme_set: ThemeSet::load_defaults(),
             available_commands: commands,
             command_list_state,
             username_area: Rect::default(),
@@ -280,7 +302,6 @@ fn handle_login_input(app: &mut App, key: KeyCode) {
         }
         KeyCode::Enter => {
             if !app.username.trim().is_empty() {
-                // Pre-compute string to avoid overlapping borrow on `app`
                 let login_msg = format!("System: Logged in as {}", app.username);
                 if let Some(session) = app.current_session_mut() {
                     session.messages.push(login_msg);
@@ -307,7 +328,6 @@ fn handle_login_input(app: &mut App, key: KeyCode) {
 fn handle_chat_input(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
     let is_command_mode = app.chat_input.starts_with('/');
 
-    // Command palette navigation when typing '/'
     if is_command_mode {
         let filtered = app.filtered_commands();
         match key {
@@ -333,7 +353,6 @@ fn handle_chat_input(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
         }
     }
 
-    // Panel navigation via Tab / Shift+Tab
     if key == KeyCode::Tab {
         app.active_panel = match app.active_panel {
             ActivePanel::Input => ActivePanel::Sidebar,
@@ -350,7 +369,6 @@ fn handle_chat_input(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
         return;
     }
 
-    // Active panel actions
     match app.active_panel {
         ActivePanel::Sidebar => match key {
             KeyCode::Up | KeyCode::Char('k') => app.previous_session(),
@@ -396,7 +414,6 @@ fn handle_mouse_click(app: &mut App, mouse: MouseEvent) {
             if app.sidebar_area.contains(pos) {
                 app.active_panel = ActivePanel::Sidebar;
 
-                // Select channel clicked in sidebar
                 let relative_y = pos.y.saturating_sub(app.sidebar_area.y + 1);
                 let clicked_idx = relative_y as usize;
                 if clicked_idx < app.sessions.len() {
@@ -440,6 +457,78 @@ fn execute_command(app: &mut App, cmd: &str) {
     if cmd != "/nick" {
         app.chat_input.clear();
     }
+}
+
+// ==========================================
+// SYNTECT HIGHLIGHTING HELPER
+// ==========================================
+
+fn syntect_to_ratatui_style(style: SyntectStyle) -> ratatui::style::Style {
+    let fg = style.foreground;
+    ratatui::style::Style::default().fg(ratatui::style::Color::Rgb(fg.r, fg.g, fg.b))
+}
+
+fn parse_message_lines<'a>(
+    msg: &'a str,
+    syntax_set: &SyntaxSet,
+    theme_set: &ThemeSet,
+) -> Vec<Line<'a>> {
+    let theme = &theme_set.themes["base16-ocean.dark"];
+    let mut lines = Vec::new();
+
+    let is_right_aligned = msg.starts_with("Bot:") || msg.starts_with("System:");
+    let mut in_code_block = false;
+    let mut current_syntax = syntax_set.find_syntax_plain_text();
+
+    for raw_line in msg.lines() {
+        let trimmed = raw_line.trim();
+
+        // Toggle code block state when encountering ```
+        if trimmed.starts_with("```") {
+            if in_code_block {
+                in_code_block = false;
+            } else {
+                in_code_block = true;
+                let lang = trimmed.trim_start_matches('`').trim();
+                current_syntax = syntax_set
+                    .find_syntax_by_token(lang)
+                    .unwrap_or_else(|| syntax_set.find_syntax_plain_text());
+            }
+
+            lines.push(Line::from(Span::styled(
+                raw_line.to_string(),
+                ratatui::style::Style::default().fg(ratatui::style::Color::DarkGray),
+            )));
+            continue;
+        }
+
+        if in_code_block {
+            let mut highlighter = HighlightLines::new(current_syntax, theme);
+            if let Ok(ranges) = highlighter.highlight_line(raw_line, syntax_set) {
+                let spans: Vec<Span> = ranges
+                    .into_iter()
+                    .map(|(style, text)| {
+                        Span::styled(text.to_string(), syntect_to_ratatui_style(style))
+                    })
+                    .collect();
+                lines.push(Line::from(spans));
+            } else {
+                lines.push(Line::from(raw_line.to_string()));
+            }
+        } else {
+            let mut line = Line::from(raw_line.to_string());
+            if is_right_aligned {
+                line = line.alignment(Alignment::Right);
+            }
+            lines.push(line);
+        }
+    }
+
+    if lines.is_empty() {
+        lines.push(Line::from(msg.to_string()));
+    }
+
+    lines
 }
 
 // ==========================================
@@ -490,7 +579,6 @@ fn render_login_screen(frame: &mut Frame, app: &mut App) {
         ])
         .split(block_area);
 
-    // Record mouse hit bounds
     app.username_area = inner_layout[0];
     app.password_area = inner_layout[1];
 
@@ -524,7 +612,6 @@ fn render_login_screen(frame: &mut Frame, app: &mut App) {
         .style(Style::default().fg(Color::Gray));
     frame.render_widget(help_text, inner_layout[2]);
 
-    // Set cursor based on active field
     match app.active_field {
         LoginField::Username => {
             let cursor_x = inner_layout[0].x + 1 + app.username.len() as u16;
@@ -544,13 +631,9 @@ fn render_login_screen(frame: &mut Frame, app: &mut App) {
 fn render_chat_screen(frame: &mut Frame, app: &mut App) {
     let main_layout = Layout::default()
         .direction(Direction::Horizontal)
-        .constraints([
-            Constraint::Length(22), // Sidebar width
-            Constraint::Min(1),     // Chat area
-        ])
+        .constraints([Constraint::Length(22), Constraint::Min(1)])
         .split(frame.size());
 
-    // Record Sidebar hit area
     app.sidebar_area = main_layout[0];
 
     // 1. Sidebar Channels List
@@ -582,16 +665,12 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
 
     frame.render_stateful_widget(sidebar_list, main_layout[0], &mut app.session_list_state);
 
-    // 2. Chat Layout (Messages top, Input bottom)
+    // 2. Chat Layout
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Min(1),    // Messages
-            Constraint::Length(3), // Input
-        ])
+        .constraints([Constraint::Min(1), Constraint::Length(3)])
         .split(main_layout[1]);
 
-    // Record Messages and Input hit areas
     app.messages_area = right_chunks[0];
     app.input_area = right_chunks[1];
 
@@ -606,22 +685,16 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
         .map(|s| s.name.as_str())
         .unwrap_or("Chat Room");
 
-    // Align Bot & System messages to the right border
-    let items: Vec<ListItem> = app
-        .current_session()
-        .map(|s| {
-            s.messages
-                .iter()
-                .map(|msg| {
-                    if msg.starts_with("Bot:") || msg.starts_with("System:") {
-                        ListItem::new(Line::from(msg.as_str()).alignment(Alignment::Right))
-                    } else {
-                        ListItem::new(Line::from(msg.as_str()).alignment(Alignment::Left))
-                    }
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    // Process chat messages with Syntect syntax highlighting
+    let mut items: Vec<ListItem> = Vec::new();
+    if let Some(session) = app.current_session() {
+        for msg in &session.messages {
+            let lines = parse_message_lines(msg, &app.syntax_set, &app.theme_set);
+            for line in lines {
+                items.push(ListItem::new(line));
+            }
+        }
+    }
 
     let messages_list = List::new(items).block(
         Block::default()
@@ -649,21 +722,13 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(input, right_chunks[1]);
 
-    // -------------------------------------------------------------
-    // NEW: Display the terminal cursor inside the input field
-    // -------------------------------------------------------------
     if app.active_panel == ActivePanel::Input {
-        // x: left border (1 cell offset) + current character count
         let cursor_x = right_chunks[1].x + 1 + app.chat_input.len() as u16;
-        // y: top border (1 row offset)
         let cursor_y = right_chunks[1].y + 1;
-
-        // Ensure cursor doesn't render past the right border of the input box
         let max_x = right_chunks[1].x + right_chunks[1].width.saturating_sub(2);
         frame.set_cursor_position(Position::new(cursor_x.min(max_x), cursor_y));
     }
 
-    // Popup overlay for '/' commands
     if app.chat_input.starts_with('/') {
         render_command_popup(frame, app, right_chunks[1]);
     }
