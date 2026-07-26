@@ -7,6 +7,8 @@ use ratatui::{
     prelude::*,
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
+
+use ratatui::layout::Alignment;
 use std::io::{Result, stdout};
 
 enum AppMode {
@@ -330,6 +332,48 @@ fn render_login_screen(frame: &mut Frame, app: &App) {
     frame.render_widget(help_text, inner_layout[2]);
 }
 
+// fn render_chat_screen(frame: &mut Frame, app: &mut App) {
+//     let chunks = Layout::default()
+//         .direction(Direction::Vertical)
+//         .constraints([
+//             Constraint::Min(1),    // Messages area
+//             Constraint::Length(3), // Input area
+//         ])
+//         .split(frame.size());
+//
+//     // Messages View
+//     let items: Vec<ListItem> = app
+//         .messages
+//         .iter()
+//         .map(|msg| ListItem::new(msg.as_str()))
+//         .collect();
+//
+//     let messages_list = List::new(items).block(
+//         Block::default()
+//             .borders(Borders::ALL)
+//             .title(" Chat Room ")
+//             .border_style(Style::default().fg(Color::Green)),
+//     );
+//     frame.render_widget(messages_list, chunks[0]);
+//
+//     // Input View
+//     let input = Paragraph::new(app.chat_input.as_str()).block(
+//         Block::default()
+//             .borders(Borders::ALL)
+//             .title(format!(
+//                 " Type Message as [{}] (Type '/' for commands) ",
+//                 app.username
+//             ))
+//             .border_style(Style::default().fg(Color::Yellow)),
+//     );
+//     frame.render_widget(input, chunks[1]);
+//
+//     // Render Command Selection Popup overlay if input starts with '/'
+//     if app.chat_input.starts_with('/') {
+//         render_command_popup(frame, app, chunks[1]);
+//     }
+// }
+
 fn render_chat_screen(frame: &mut Frame, app: &mut App) {
     let chunks = Layout::default()
         .direction(Direction::Vertical)
@@ -343,7 +387,17 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
     let items: Vec<ListItem> = app
         .messages
         .iter()
-        .map(|msg| ListItem::new(msg.as_str()))
+        .map(|msg| {
+            // Check if the message is from "Bot:" or "System:" to align right
+            if msg.starts_with("Bot:") || msg.starts_with("System:") {
+                let line = Line::from(msg.as_str()).alignment(Alignment::Right);
+                ListItem::new(line)
+            } else {
+                // User messages remain left-aligned
+                let line = Line::from(msg.as_str()).alignment(Alignment::Left);
+                ListItem::new(line)
+            }
+        })
         .collect();
 
     let messages_list = List::new(items).block(
@@ -422,4 +476,3 @@ fn render_command_popup(frame: &mut Frame, app: &mut App, input_area: Rect) {
 
     frame.render_stateful_widget(popup_list, popup_area, &mut app.command_list_state);
 }
-
