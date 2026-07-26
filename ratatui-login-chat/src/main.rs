@@ -1,6 +1,9 @@
 use crossterm::{
     ExecutableCommand,
-    event::{self, Event, KeyCode, KeyEventKind, KeyModifiers},
+    event::{
+        self, DisableMouseCapture, EnableMouseCapture, Event, KeyCode, KeyEventKind, KeyModifiers,
+        MouseButton, MouseEvent, MouseEventKind,
+    },
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
 use ratatui::{
@@ -8,6 +11,10 @@ use ratatui::{
     widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph},
 };
 use std::io::{Result, stdout};
+
+// ==========================================
+// STATE MODELS
+// ==========================================
 
 enum AppMode {
     Login,
@@ -45,6 +52,12 @@ struct App {
     // Command Popup State
     available_commands: Vec<(&'static str, &'static str)>,
     command_list_state: ListState,
+    // Clickable Layout Areas (Hit Testing)
+    username_area: Rect,
+    password_area: Rect,
+    sidebar_area: Rect,
+    messages_area: Rect,
+    input_area: Rect,
 }
 
 impl App {
@@ -95,6 +108,11 @@ impl App {
             chat_input: String::new(),
             available_commands: commands,
             command_list_state,
+            username_area: Rect::default(),
+            password_area: Rect::default(),
+            sidebar_area: Rect::default(),
+            messages_area: Rect::default(),
+            input_area: Rect::default(),
         }
     }
 
@@ -197,8 +215,13 @@ impl App {
     }
 }
 
+// ==========================================
+// MAIN LOOP & TERMINAL SETUP
+// ==========================================
+
 fn main() -> Result<()> {
     stdout().execute(EnterAlternateScreen)?;
+    stdout().execute(EnableMouseCapture)?;
     enable_raw_mode()?;
     let mut terminal = Terminal::new(CrosstermBackend::new(stdout()))?;
 
@@ -208,32 +231,43 @@ fn main() -> Result<()> {
         terminal.draw(|frame| render_ui(frame, &mut app))?;
 
         if event::poll(std::time::Duration::from_millis(16))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press {
-                    if key.code == KeyCode::Esc {
-                        if app.chat_input.starts_with('/') {
-                            app.chat_input.clear();
+            match event::read()? {
+                Event::Key(key) => {
+                    if key.kind == KeyEventKind::Press {
+                        if key.code == KeyCode::Esc {
+                            if app.chat_input.starts_with('/') {
+                                app.chat_input.clear();
+                            } else {
+                                break;
+                            }
                         } else {
-                            break;
-                        }
-                    } else {
-                        match app.mode {
-                            AppMode::Login => handle_login_input(&mut app, key.code),
-                            AppMode::Chat => handle_chat_input(&mut app, key.code, key.modifiers),
+                            match app.mode {
+                                AppMode::Login => handle_login_input(&mut app, key.code),
+                                AppMode::Chat => {
+                                    handle_chat_input(&mut app, key.code, key.modifiers)
+                                }
+                            }
                         }
                     }
                 }
+                Event::Mouse(mouse) => {
+                    if mouse.kind == MouseEventKind::Down(MouseButton::Left) {
+                        handle_mouse_click(&mut app, mouse);
+                    }
+                }
+                _ => {}
             }
         }
     }
 
     disable_raw_mode()?;
+    stdout().execute(DisableMouseCapture)?;
     stdout().execute(LeaveAlternateScreen)?;
     Ok(())
 }
 
 // ==========================================
-// INPUT HANDLERS
+// EVENT HANDLERS
 // ==========================================
 
 fn handle_login_input(app: &mut App, key: KeyCode) {
@@ -246,7 +280,7 @@ fn handle_login_input(app: &mut App, key: KeyCode) {
         }
         KeyCode::Enter => {
             if !app.username.trim().is_empty() {
-                // Format/clone the message first, before borrowing app mutably
+                // Pre-compute string to avoid overlapping borrow on `app`
                 let login_msg = format!("System: Logged in as {}", app.username);
                 if let Some(session) = app.current_session_mut() {
                     session.messages.push(login_msg);
@@ -270,10 +304,10 @@ fn handle_login_input(app: &mut App, key: KeyCode) {
     }
 }
 
-fn handle_chat_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
+fn handle_chat_input(app: &mut App, key: KeyCode, _modifiers: KeyModifiers) {
     let is_command_mode = app.chat_input.starts_with('/');
 
-    // Command palette Navigation (Active when typing '/')
+    // Command palette navigation when typing '/'
     if is_command_mode {
         let filtered = app.filtered_commands();
         match key {
@@ -299,7 +333,7 @@ fn handle_chat_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         }
     }
 
-    // Tab Navigation between Panels
+    // Panel navigation via Tab / Shift+Tab
     if key == KeyCode::Tab {
         app.active_panel = match app.active_panel {
             ActivePanel::Input => ActivePanel::Sidebar,
@@ -316,16 +350,14 @@ fn handle_chat_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
         return;
     }
 
-    // Panel-specific Controls
+    // Active panel actions
     match app.active_panel {
         ActivePanel::Sidebar => match key {
             KeyCode::Up | KeyCode::Char('k') => app.previous_session(),
             KeyCode::Down | KeyCode::Char('j') => app.next_session(),
             _ => {}
         },
-        ActivePanel::ChatBox => {
-            // Scroll controls for messages can be expanded here
-        }
+        ActivePanel::ChatBox => {}
         ActivePanel::Input => match key {
             KeyCode::Enter => {
                 if !app.chat_input.trim().is_empty() {
@@ -346,6 +378,36 @@ fn handle_chat_input(app: &mut App, key: KeyCode, modifiers: KeyModifiers) {
             }
             _ => {}
         },
+    }
+}
+
+fn handle_mouse_click(app: &mut App, mouse: MouseEvent) {
+    let pos = Position::new(mouse.column, mouse.row);
+
+    match app.mode {
+        AppMode::Login => {
+            if app.username_area.contains(pos) {
+                app.active_field = LoginField::Username;
+            } else if app.password_area.contains(pos) {
+                app.active_field = LoginField::Password;
+            }
+        }
+        AppMode::Chat => {
+            if app.sidebar_area.contains(pos) {
+                app.active_panel = ActivePanel::Sidebar;
+
+                // Select channel clicked in sidebar
+                let relative_y = pos.y.saturating_sub(app.sidebar_area.y + 1);
+                let clicked_idx = relative_y as usize;
+                if clicked_idx < app.sessions.len() {
+                    app.session_list_state.select(Some(clicked_idx));
+                }
+            } else if app.messages_area.contains(pos) {
+                app.active_panel = ActivePanel::ChatBox;
+            } else if app.input_area.contains(pos) {
+                app.active_panel = ActivePanel::Input;
+            }
+        }
     }
 }
 
@@ -391,7 +453,7 @@ fn render_ui(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn render_login_screen(frame: &mut Frame, app: &App) {
+fn render_login_screen(frame: &mut Frame, app: &mut App) {
     let area = frame.size();
     let vertical_center = Layout::default()
         .direction(Direction::Vertical)
@@ -428,6 +490,10 @@ fn render_login_screen(frame: &mut Frame, app: &App) {
         ])
         .split(block_area);
 
+    // Record mouse hit bounds
+    app.username_area = inner_layout[0];
+    app.password_area = inner_layout[1];
+
     let user_border_color = match app.active_field {
         LoginField::Username => Color::Yellow,
         _ => Color::DarkGray,
@@ -454,22 +520,24 @@ fn render_login_screen(frame: &mut Frame, app: &App) {
     );
     frame.render_widget(password_widget, inner_layout[1]);
 
-    let help_text = Paragraph::new("Press Tab/Arrow Keys to switch fields | Enter to Login")
+    let help_text = Paragraph::new("Click field or Tab/Arrows to focus | Enter to Login")
         .style(Style::default().fg(Color::Gray));
     frame.render_widget(help_text, inner_layout[2]);
 }
 
 fn render_chat_screen(frame: &mut Frame, app: &mut App) {
-    // Horizontal layout split: Sidebar (left) vs Main Chat Area (right)
     let main_layout = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([
             Constraint::Length(22), // Sidebar width
-            Constraint::Min(1),     // Chat area space
+            Constraint::Min(1),     // Chat area
         ])
         .split(frame.size());
 
-    // 1. Render Sidebar
+    // Record Sidebar hit area
+    app.sidebar_area = main_layout[0];
+
+    // 1. Sidebar Channels List
     let sidebar_items: Vec<ListItem> = app
         .sessions
         .iter()
@@ -498,16 +566,19 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
 
     frame.render_stateful_widget(sidebar_list, main_layout[0], &mut app.session_list_state);
 
-    // 2. Vertical layout for Chat Area (Messages top, Input bottom)
+    // 2. Chat Layout (Messages top, Input bottom)
     let right_chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
-            Constraint::Min(1),    // Messages area
-            Constraint::Length(3), // Input area
+            Constraint::Min(1),    // Messages
+            Constraint::Length(3), // Input
         ])
         .split(main_layout[1]);
 
-    // Render Messages View for currently selected session
+    // Record Messages and Input hit areas
+    app.messages_area = right_chunks[0];
+    app.input_area = right_chunks[1];
+
     let chat_border_color = if app.active_panel == ActivePanel::ChatBox {
         Color::Yellow
     } else {
@@ -519,6 +590,7 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
         .map(|s| s.name.as_str())
         .unwrap_or("Chat Room");
 
+    // Align Bot & System messages to the right border
     let items: Vec<ListItem> = app
         .current_session()
         .map(|s| {
@@ -543,7 +615,7 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
     );
     frame.render_widget(messages_list, right_chunks[0]);
 
-    // Render Input View
+    // Input View
     let input_border_color = if app.active_panel == ActivePanel::Input {
         Color::Yellow
     } else {
@@ -554,14 +626,14 @@ fn render_chat_screen(frame: &mut Frame, app: &mut App) {
         Block::default()
             .borders(Borders::ALL)
             .title(format!(
-                " Message [{}] (Tab to switch panel | '/' for commands) ",
+                " Message [{}] (Tab to switch | '/' for commands) ",
                 app.username
             ))
             .border_style(Style::default().fg(input_border_color)),
     );
     frame.render_widget(input, right_chunks[1]);
 
-    // Render Command Selection Popup overlay if typing '/'
+    // Popup overlay for '/' commands
     if app.chat_input.starts_with('/') {
         render_command_popup(frame, app, right_chunks[1]);
     }
@@ -615,3 +687,4 @@ fn render_command_popup(frame: &mut Frame, app: &mut App, input_area: Rect) {
 
     frame.render_stateful_widget(popup_list, popup_area, &mut app.command_list_state);
 }
+
